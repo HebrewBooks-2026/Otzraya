@@ -1,0 +1,53 @@
+name: מחיקת ספרים בלי זכויות יוצרים
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: delete-non-copyrighted
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    # שכבת הגנה ראשונה נגד לולאת push:
+    # אם הקומיט נוצר ע"י ה-bot של ה-Action, אל תרוץ בכלל.
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          # token עם permissions: contents: write כדי לאפשר push בחזרה
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run deletion script
+        run: python delete_by_source.py
+
+      - name: Commit and push if files were deleted
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [[ -z "$(git status --porcelain)" ]]; then
+            echo "אין שינויים — לא נדרש commit."
+            exit 0
+          fi
+
+          git add -A
+          # שכבת הגנה שניה נגד לולאת push:
+          # [skip ci] בכותרת הקומיט גורם ל-GitHub לדלג על workflows.
+          git commit -m "מחיקת ספרים עם זכויות יוצרים [skip ci]"
+          git push
