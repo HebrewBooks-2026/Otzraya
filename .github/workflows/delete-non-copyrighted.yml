@@ -1,0 +1,79 @@
+name: מחיקת ספרים בלי זכויות יוצרים (מבוקר)
+
+# גרסה בטוחה של ה-workflow מ-PR #1. שלושה שינויי בטיחות מול המקור:
+#   1. לא רץ יותר בכל push ל-main — רק ידנית (workflow_dispatch) או בתזמון שבועי.
+#      כך מחיקה הרסנית לעולם לא קורית "בהפתעה" כתוצאה מ-push רגיל.
+#   2. מפסק בטיחות (circuit breaker): קודם מריץ dry-run, סופר כמה קבצים יימחקו,
+#      ואם זה חורג מהסף (ברירת מחדל 300) — עוצר בלי למחוק כלום. הגנה מפני CSV
+#      חיצוני שגוי/מושחת שיסמן המוני ספרים למחיקה.
+#   3. מדפיס סיכום מלא ללוג (audit) לפני המחיקה.
+#
+# המקור-אמת עדיין נמשך חי מ-Otzaria/otzaria-library (כמו במקור). לרמת בטיחות
+# גבוהה יותר אפשר להצמיד עותק מאומת של SourcesBooks.csv בריפו ולקרוא לסקריפט
+# עם --csv <path> במקום משיכה חיה (ואז כל שינוי ברשימת-המחיקה הוא diff שנסקר).
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_delete:
+        description: "סף בטיחות — בטל את הריצה אם יותר מהמספר הזה קבצים מסומנים למחיקה"
+        default: "300"
+        required: false
+  schedule:
+    - cron: "0 3 * * 0"   # כל יום ראשון 03:00 UTC
+
+permissions:
+  contents: write
+
+concurrency:
+  group: delete-non-copyrighted
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    # נשמר כהגנה דפנסיבית אם מישהו יחזיר טריגר push בעתיד.
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Dry-run + circuit breaker
+        run: |
+          MAX="${{ github.event.inputs.max_delete || '300' }}"
+          echo "סף בטיחות (max_delete): $MAX"
+          # כותבים את ה-dry-run אל מחוץ לעץ-הריפו כדי שלא ייכנס ל-commit.
+          python delete_by_source.py --dry-run | tee "$RUNNER_TEMP/dryrun.log"
+          COUNT=$(grep -c 'יימחק' "$RUNNER_TEMP/dryrun.log" || true)
+          echo "קבצים שקיימים בדיסק ומסומנים למחיקה: $COUNT"
+          if [ "$COUNT" -gt "$MAX" ]; then
+            echo "::error::מפסק בטיחות הופעל — $COUNT קבצים למחיקה חורגים מהסף $MAX. עוצר בלי למחוק. בדוק את SourcesBooks.csv, ואם זה תקין הרץ ידנית עם max_delete גבוה יותר."
+            exit 1
+          fi
+
+      - name: Delete
+        run: python delete_by_source.py
+
+      - name: Commit and push if files were deleted
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [[ -z "$(git status --porcelain)" ]]; then
+            echo "אין שינויים — לא נדרש commit."
+            exit 0
+          fi
+
+          git add -A
+          # [skip ci] נשמר כהגנה דפנסיבית (במקרה שיוחזר טריגר push).
+          git commit -m "מחיקת ספרים עם זכויות יוצרים [skip ci]"
+          git push
